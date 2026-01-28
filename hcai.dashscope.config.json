@@ -1,0 +1,17 @@
+{
+  "Providers": [
+    {
+      "name": "dashscope",
+      "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "models": ["qwen3-max"],
+      "transformer": {
+        "use": [["maxtoken", { "max_tokens": 4096 }]]
+      }
+    }
+  ],
+  "Router": {
+    "default": "dashscope,qwen3-max",
+    "HOST": "127.0.0.1",
+    "LOG": false
+  }
+}
