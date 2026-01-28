@@ -1,25 +1,10 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-
-# Node.js binary (downloaded separately)
-node-v20.11.1-win-x64/
-node-v20.11.1-win-x64.zip
-
-# IDE
-.vscode/
-.idea/
-
 # OS files
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
 
-# Environment files
+# Environment files (contains secrets)
 .env
 .env.local
