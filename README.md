@@ -1,4 +1,4 @@
-﻿# hc-code（Huawei Code Assistant）
+﻿# hc-code（Hand Claude Assistant）
 
 本项目是一个"类 Claude Code"的本地 CLI 代码助手，命令为 `hc`。
 
