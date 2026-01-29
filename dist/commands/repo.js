@@ -9,6 +9,7 @@ const common_1 = require("./common");
 const scan_1 = require("../repo/scan");
 const repo_1 = require("../repo");
 const context_1 = require("../repo/context");
+const memory_1 = require("../repo/memory");
 const router_1 = require("../router/router");
 const openaiCompatClient_1 = require("../provider/openaiCompatClient");
 const system_1 = require("../prompts/system");
@@ -24,6 +25,24 @@ function askConfirm(question) {
             resolve(["y", "yes"].includes(answer.trim().toLowerCase()));
         });
     });
+}
+function truncateText(text, maxLen) {
+    if (text.length <= maxLen)
+        return text;
+    return `${text.slice(0, maxLen)}...`;
+}
+function buildHistoryText(entries, limit) {
+    if (!entries || entries.length === 0)
+        return "";
+    const start = Math.max(0, entries.length - limit);
+    const slice = entries.slice(start);
+    const lines = [];
+    for (const item of slice) {
+        lines.push(`Q: ${item.question}`);
+        lines.push(`A: ${item.answer}`);
+        lines.push("");
+    }
+    return lines.join("\n").trim();
 }
 function registerRepoCommand(program) {
     const repo = program
@@ -44,7 +63,10 @@ function registerRepoCommand(program) {
         .argument("<task>", "Task/question")
         .option("--model <provider,model>", "Override default provider,model")
         .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
-        .option("--no-stream", "Disable streaming responses")).action(async (task, opts) => {
+        .option("--no-stream", "Disable streaming responses")
+        .option("--no-memory", "Disable repo ask memory")
+        .option("--reset-memory", "Clear saved repo ask memory before asking")
+        .option("--history <n>", "Number of Q/A pairs to include (default 5)", (v) => Number(v), 5)).action(async (task, opts) => {
         const { loaded, logger } = await (0, common_1.loadConfigAndLogger)(opts);
         const index = await (0, repo_1.loadRepoIndex)(process.cwd());
         if (!index) {
@@ -56,6 +78,15 @@ function registerRepoCommand(program) {
             index,
             task
         });
+        const memoryEnabled = Boolean(opts.memory);
+        const memory = memoryEnabled
+            ? await (0, memory_1.loadRepoAskMemory)(process.cwd())
+            : { version: 1, entries: [] };
+        if (opts.resetMemory && memoryEnabled) {
+            memory.entries = [];
+            await (0, memory_1.saveRepoAskMemory)(process.cwd(), memory);
+        }
+        const historyText = buildHistoryText(memory.entries, opts.history);
         const messages = [
             { role: "system", content: system_1.DEFAULT_SYSTEM_PROMPT },
             {
@@ -64,6 +95,9 @@ function registerRepoCommand(program) {
                     "你现在在一个代码仓库中工作。",
                     "先阅读下面的仓库上下文，再回答任务。",
                     "",
+                    historyText ? "# History" : "",
+                    historyText ? historyText : "",
+                    historyText ? "" : "",
                     repoContext,
                     "",
                     "# Task",
@@ -84,9 +118,13 @@ function registerRepoCommand(program) {
             timeoutMs: 90_000,
             logger
         });
+        let output = "";
         if (opts.stream) {
             await client.chatStream(req, {
-                onToken: (token) => process.stdout.write(token),
+                onToken: (token) => {
+                    output += token;
+                    process.stdout.write(token);
+                },
                 onDone: () => { },
                 onError: (err) => {
                     const message = err instanceof Error ? err.message : String(err);
@@ -95,11 +133,24 @@ function registerRepoCommand(program) {
                 }
             });
             process.stdout.write("\n");
-            return;
         }
-        const result = await client.chat(req);
-        // eslint-disable-next-line no-console
-        console.log(result.content);
+        else {
+            const result = await client.chat(req);
+            output = result.content;
+            // eslint-disable-next-line no-console
+            console.log(result.content);
+        }
+        if (memoryEnabled && output.trim().length > 0) {
+            memory.entries.push({
+                question: truncateText(task, 800),
+                answer: truncateText(output, 4000),
+                at: new Date().toISOString()
+            });
+            if (memory.entries.length > 50) {
+                memory.entries = memory.entries.slice(-50);
+            }
+            await (0, memory_1.saveRepoAskMemory)(process.cwd(), memory);
+        }
     });
     (0, common_1.addGlobalOptions)(repo
         .command("edit")

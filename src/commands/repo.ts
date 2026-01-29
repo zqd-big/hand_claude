@@ -4,6 +4,7 @@ import { addGlobalOptions, loadConfigAndLogger } from "./common";
 import { scanRepo } from "../repo/scan";
 import { loadRepoIndex } from "../repo";
 import { buildRepoContext } from "../repo/context";
+import { loadRepoAskMemory, saveRepoAskMemory } from "../repo/memory";
 import { resolveRoute, applyProviderTransformers } from "../router/router";
 import { OpenAICompatClient } from "../provider/openaiCompatClient";
 import { DEFAULT_SYSTEM_PROMPT } from "../prompts/system";
@@ -25,6 +26,27 @@ function askConfirm(question: string): Promise<boolean> {
       resolve(["y", "yes"].includes(answer.trim().toLowerCase()));
     });
   });
+}
+
+function truncateText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}...`;
+}
+
+function buildHistoryText(
+  entries: { question: string; answer: string }[],
+  limit: number
+): string {
+  if (!entries || entries.length === 0) return "";
+  const start = Math.max(0, entries.length - limit);
+  const slice = entries.slice(start);
+  const lines: string[] = [];
+  for (const item of slice) {
+    lines.push(`Q: ${item.question}`);
+    lines.push(`A: ${item.answer}`);
+    lines.push("");
+  }
+  return lines.join("\n").trim();
 }
 
 export function registerRepoCommand(program: Command): void {
@@ -52,6 +74,14 @@ export function registerRepoCommand(program: Command): void {
       .option("--model <provider,model>", "Override default provider,model")
       .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
       .option("--no-stream", "Disable streaming responses")
+      .option("--no-memory", "Disable repo ask memory")
+      .option("--reset-memory", "Clear saved repo ask memory before asking")
+      .option(
+        "--history <n>",
+        "Number of Q/A pairs to include (default 5)",
+        (v) => Number(v),
+        5
+      )
   ).action(async (task: string, opts) => {
     const { loaded, logger } = await loadConfigAndLogger(opts);
     const index = await loadRepoIndex(process.cwd());
@@ -66,6 +96,18 @@ export function registerRepoCommand(program: Command): void {
       task
     });
 
+    const memoryEnabled = Boolean(opts.memory);
+    const memory = memoryEnabled
+      ? await loadRepoAskMemory(process.cwd())
+      : { version: 1 as const, entries: [] };
+
+    if (opts.resetMemory && memoryEnabled) {
+      memory.entries = [];
+      await saveRepoAskMemory(process.cwd(), memory);
+    }
+
+    const historyText = buildHistoryText(memory.entries, opts.history);
+
     const messages: ChatMessage[] = [
       { role: "system", content: DEFAULT_SYSTEM_PROMPT },
       {
@@ -74,6 +116,9 @@ export function registerRepoCommand(program: Command): void {
           "你现在在一个代码仓库中工作。",
           "先阅读下面的仓库上下文，再回答任务。",
           "",
+          historyText ? "# History" : "",
+          historyText ? historyText : "",
+          historyText ? "" : "",
           repoContext,
           "",
           "# Task",
@@ -98,9 +143,13 @@ export function registerRepoCommand(program: Command): void {
       logger
     });
 
+    let output = "";
     if (opts.stream) {
       await client.chatStream(req as any, {
-        onToken: (token) => process.stdout.write(token),
+        onToken: (token) => {
+          output += token;
+          process.stdout.write(token);
+        },
         onDone: () => {},
         onError: (err) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -109,12 +158,24 @@ export function registerRepoCommand(program: Command): void {
         }
       });
       process.stdout.write("\n");
-      return;
+    } else {
+      const result = await client.chat(req as any);
+      output = result.content;
+      // eslint-disable-next-line no-console
+      console.log(result.content);
     }
 
-    const result = await client.chat(req as any);
-    // eslint-disable-next-line no-console
-    console.log(result.content);
+    if (memoryEnabled && output.trim().length > 0) {
+      memory.entries.push({
+        question: truncateText(task, 800),
+        answer: truncateText(output, 4000),
+        at: new Date().toISOString()
+      });
+      if (memory.entries.length > 50) {
+        memory.entries = memory.entries.slice(-50);
+      }
+      await saveRepoAskMemory(process.cwd(), memory);
+    }
   });
 
   addGlobalOptions(
