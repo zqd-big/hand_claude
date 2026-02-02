@@ -5,13 +5,19 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runRepoChatRepl = runRepoChatRepl;
 const node_readline_1 = __importDefault(require("node:readline"));
+const node_path_1 = __importDefault(require("node:path"));
 const system_1 = require("../prompts/system");
 const router_1 = require("../router/router");
 const openaiCompatClient_1 = require("../provider/openaiCompatClient");
 const context_1 = require("../repo/context");
+const tools_1 = require("../repo/tools");
 async function runRepoChatRepl(opts) {
     let currentRouteRef = opts.modelOverride ?? opts.config.Router.default;
     let route = (0, router_1.resolveRoute)(opts.config, currentRouteRef);
+    const MAX_OPEN_FILES = 6;
+    const MAX_OPEN_FILE_BYTES = 12_000;
+    const extraContextBlocks = [];
+    const openedFiles = new Set();
     const summary = await (0, context_1.buildRepoSummaryContext)({
         cwd: opts.cwd,
         index: opts.index,
@@ -38,6 +44,7 @@ async function runRepoChatRepl(opts) {
         console.log([
             "/model <provider,model>  切换模型",
             "/new                     新会话",
+            "/open <path>             读取文件并追加上下文",
             "/help                    帮助",
             "/exit                    退出"
         ].join("\n"));
@@ -69,6 +76,8 @@ async function runRepoChatRepl(opts) {
             }
             if (trimmed === "/new") {
                 messages = [{ role: "system", content: systemPrompt }];
+                extraContextBlocks.length = 0;
+                openedFiles.clear();
                 // eslint-disable-next-line no-console
                 console.log("New repo chat session started.");
                 rl.prompt();
@@ -83,6 +92,45 @@ async function runRepoChatRepl(opts) {
                 rl.prompt();
                 return;
             }
+            if (trimmed.startsWith("/open ")) {
+                const rawPath = trimmed.slice("/open ".length).trim();
+                if (!rawPath) {
+                    // eslint-disable-next-line no-console
+                    console.log("Usage: /open <path>");
+                    rl.prompt();
+                    return;
+                }
+                const targetPath = node_path_1.default.isAbsolute(rawPath)
+                    ? node_path_1.default.relative(opts.cwd, rawPath)
+                    : rawPath;
+                const normalized = targetPath.replace(/\\/g, "/");
+                if (normalized.startsWith("..")) {
+                    // eslint-disable-next-line no-console
+                    console.log("Only files inside the repo are allowed.");
+                    rl.prompt();
+                    return;
+                }
+                if (openedFiles.has(normalized)) {
+                    // eslint-disable-next-line no-console
+                    console.log(`Already loaded: ${normalized}`);
+                    rl.prompt();
+                    return;
+                }
+                const file = await (0, tools_1.readFileTruncated)(opts.cwd, normalized, {
+                    maxBytes: MAX_OPEN_FILE_BYTES
+                });
+                const title = `## Opened File: ${normalized}${file.truncated ? " (truncated)" : ""}`;
+                const block = [title, "```text", file.content, "```"].join("\n");
+                extraContextBlocks.push(block);
+                openedFiles.add(normalized);
+                if (extraContextBlocks.length > MAX_OPEN_FILES) {
+                    extraContextBlocks.shift();
+                }
+                // eslint-disable-next-line no-console
+                console.log(`Loaded: ${normalized}`);
+                rl.prompt();
+                return;
+            }
             const searchContext = await (0, context_1.buildRepoSearchContext)({
                 cwd: opts.cwd,
                 index: opts.index,
@@ -91,7 +139,12 @@ async function runRepoChatRepl(opts) {
                 keywordLimit: 3,
                 searchLimit: 60
             });
+            const extraContext = extraContextBlocks.length > 0
+                ? ["# Opened Files", ...extraContextBlocks].join("\n\n")
+                : "";
             const userContent = [
+                extraContext ? extraContext : "",
+                extraContext ? "" : "",
                 searchContext ? searchContext : "",
                 searchContext ? "" : "",
                 "# Task",
@@ -131,12 +184,16 @@ async function runRepoChatRepl(opts) {
                 });
                 process.stdout.write("\n");
                 messages.push({ role: "assistant", content: acc });
+                // eslint-disable-next-line no-console
+                console.log("Tip: use /open <path> to load file content into context.");
             }
             else {
                 const result = await client.chat(req);
                 // eslint-disable-next-line no-console
                 console.log(result.content);
                 messages.push({ role: "assistant", content: result.content });
+                // eslint-disable-next-line no-console
+                console.log("Tip: use /open <path> to load file content into context.");
             }
         }
         catch (err) {

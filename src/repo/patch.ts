@@ -21,6 +21,18 @@ export interface PatchSummary {
   totalRemoved: number;
 }
 
+export function formatPatchPreview(
+  patchText: string,
+  maxLines: number = 120
+): string {
+  const lines = patchText.split(/\r?\n/);
+  const preview = lines.slice(0, maxLines).join("\n");
+  if (lines.length > maxLines) {
+    return `${preview}\n...(preview truncated)`;
+  }
+  return preview;
+}
+
 export function extractDiffBlock(text: string): string | null {
   const fenced = text.match(/```diff\s*([\s\S]*?)```/i);
   if (fenced?.[1]) return fenced[1].trim();

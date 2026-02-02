@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.formatPatchPreview = formatPatchPreview;
 exports.extractDiffBlock = extractDiffBlock;
 exports.summarizePatch = summarizePatch;
 exports.validatePatchAgainstRepo = validatePatchAgainstRepo;
@@ -10,6 +11,14 @@ exports.applyPatchToRepo = applyPatchToRepo;
 const promises_1 = __importDefault(require("node:fs/promises"));
 const node_path_1 = __importDefault(require("node:path"));
 const diff_1 = require("diff");
+function formatPatchPreview(patchText, maxLines = 120) {
+    const lines = patchText.split(/\r?\n/);
+    const preview = lines.slice(0, maxLines).join("\n");
+    if (lines.length > maxLines) {
+        return `${preview}\n...(preview truncated)`;
+    }
+    return preview;
+}
 function extractDiffBlock(text) {
     const fenced = text.match(/```diff\s*([\s\S]*?)```/i);
     if (fenced?.[1])

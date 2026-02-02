@@ -32,18 +32,83 @@ function truncateText(text, maxLen) {
         return text;
     return `${text.slice(0, maxLen)}...`;
 }
-function buildHistoryText(entries, limit) {
-    if (!entries || entries.length === 0)
-        return "";
+function buildHistoryText(memory, limit) {
+    const lines = [];
+    const summary = memory.summary?.trim();
+    if (summary) {
+        lines.push("# Summary");
+        lines.push(summary);
+        lines.push("");
+    }
+    const entries = memory.entries ?? [];
+    if (entries.length === 0)
+        return lines.join("\n").trim();
     const start = Math.max(0, entries.length - limit);
     const slice = entries.slice(start);
-    const lines = [];
+    lines.push("# Recent Q/A");
     for (const item of slice) {
         lines.push(`Q: ${item.question}`);
         lines.push(`A: ${item.answer}`);
         lines.push("");
     }
     return lines.join("\n").trim();
+}
+function estimateEntriesChars(entries) {
+    return entries.reduce((acc, item) => acc + item.question.length + item.answer.length + 8, 0);
+}
+function shouldSummarizeMemory(memory) {
+    const totalChars = estimateEntriesChars(memory.entries ?? []) + (memory.summary?.length ?? 0);
+    return memory.entries.length > 12 || totalChars > 12_000;
+}
+function formatEntriesForSummary(entries) {
+    const lines = [];
+    for (const item of entries) {
+        const q = item.question.length > 200
+            ? `${item.question.slice(0, 200)}...`
+            : item.question;
+        const a = item.answer.length > 400
+            ? `${item.answer.slice(0, 400)}...`
+            : item.answer;
+        lines.push(`Q: ${q}`);
+        lines.push(`A: ${a}`);
+        lines.push("");
+    }
+    return lines.join("\n").trim();
+}
+async function summarizeMemoryWithModel(client, route, memory, olderEntries) {
+    if (olderEntries.length === 0) {
+        return memory.summary ?? "";
+    }
+    const prompt = [
+        "你是一个精简摘要助手，请将对话历史总结成简洁要点。",
+        "要求：",
+        "1) 保留关键事实、结论、未解决问题。",
+        "2) 输出中文，使用条目符号。",
+        "3) 不要超过 12 条。",
+        "",
+        "已有摘要：",
+        memory.summary?.trim() ? memory.summary : "(无)",
+        "",
+        "新增历史：",
+        formatEntriesForSummary(olderEntries),
+        "",
+        "请输出更新后的摘要："
+    ].join("\n");
+    const messages = [
+        { role: "system", content: "你是一个精简、准确的摘要助手。" },
+        { role: "user", content: prompt }
+    ];
+    const baseReq = {
+        model: route.modelName,
+        messages,
+        stream: false,
+        max_tokens: 800,
+        temperature: 0.2
+    };
+    const req = (0, router_1.applyProviderTransformers)(route.provider, baseReq);
+    const result = await client.chat(req);
+    const content = result.content?.trim();
+    return content && content.length > 0 ? content : null;
 }
 function registerRepoCommand(program) {
     const repo = program
@@ -88,6 +153,8 @@ function registerRepoCommand(program) {
         .option("--no-stream", "Disable streaming responses")
         .option("--no-memory", "Disable repo ask memory")
         .option("--reset-memory", "Clear saved repo ask memory before asking")
+        .option("--no-model-summary", "Disable model-based memory summary")
+        .option("--no-hint", "Disable hint after answer")
         .option("--history <n>", "Number of Q/A pairs to include (default 5)", (v) => Number(v), 5)).action(async (task, opts) => {
         const { loaded, logger } = await (0, common_1.loadConfigAndLogger)(opts);
         const index = await (0, repo_1.loadRepoIndex)(process.cwd());
@@ -103,12 +170,14 @@ function registerRepoCommand(program) {
         const memoryEnabled = Boolean(opts.memory);
         const memory = memoryEnabled
             ? await (0, memory_1.loadRepoAskMemory)(process.cwd())
-            : { version: 1, entries: [] };
+            : { version: 2, entries: [], summary: "", summarizedCount: 0 };
         if (opts.resetMemory && memoryEnabled) {
             memory.entries = [];
+            memory.summary = "";
+            memory.summarizedCount = 0;
             await (0, memory_1.saveRepoAskMemory)(process.cwd(), memory);
         }
-        const historyText = buildHistoryText(memory.entries, opts.history);
+        const historyText = buildHistoryText(memory, opts.history);
         const messages = [
             { role: "system", content: system_1.DEFAULT_SYSTEM_PROMPT },
             {
@@ -162,16 +231,40 @@ function registerRepoCommand(program) {
             // eslint-disable-next-line no-console
             console.log(result.content);
         }
+        if (opts.hint) {
+            // eslint-disable-next-line no-console
+            console.log("Tip: use `hc repo chat` and `/open <path>` to load files.");
+        }
         if (memoryEnabled && output.trim().length > 0) {
             memory.entries.push({
                 question: truncateText(task, 800),
                 answer: truncateText(output, 4000),
                 at: new Date().toISOString()
             });
-            if (memory.entries.length > 50) {
-                memory.entries = memory.entries.slice(-50);
+            if (opts.modelSummary && shouldSummarizeMemory(memory)) {
+                const keepLast = 4;
+                const older = memory.entries.slice(0, Math.max(0, memory.entries.length - keepLast));
+                const recent = memory.entries.slice(-keepLast);
+                try {
+                    const summary = await summarizeMemoryWithModel(client, route, memory, older);
+                    if (summary) {
+                        memory.summary = summary;
+                        memory.entries = recent;
+                        memory.summarizedCount = (memory.summarizedCount ?? 0) + older.length;
+                    }
+                }
+                catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    logger.verbose(`memory summary failed: ${message}`);
+                }
             }
-            await (0, memory_1.saveRepoAskMemory)(process.cwd(), memory);
+            const compacted = (0, memory_1.compactRepoAskMemory)(memory, {
+                maxEntries: 12,
+                keepLast: 4,
+                maxSummaryChars: 4000,
+                maxTotalChars: 12_000
+            });
+            await (0, memory_1.saveRepoAskMemory)(process.cwd(), compacted);
         }
     });
     (0, common_1.addGlobalOptions)(repo
@@ -181,7 +274,9 @@ function registerRepoCommand(program) {
         .option("--model <provider,model>", "Override default provider,model")
         .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
         .option("--yes", "Skip confirmation")
-        .option("--no-stream", "Disable streaming responses")).action(async (task, opts) => {
+        .option("--no-stream", "Disable streaming responses")
+        .option("--no-preview", "Disable patch preview")
+        .option("--preview-lines <n>", "Max preview lines (default 120)", (v) => Number(v), 120)).action(async (task, opts) => {
         const { loaded, logger } = await (0, common_1.loadConfigAndLogger)(opts);
         const index = await (0, repo_1.loadRepoIndex)(process.cwd());
         if (!index) {
@@ -259,6 +354,13 @@ function registerRepoCommand(program) {
         }
         // eslint-disable-next-line no-console
         console.log(`Total: +${validation.summary.totalAdded} -${validation.summary.totalRemoved}`);
+        if (opts.preview) {
+            const preview = (0, patch_1.formatPatchPreview)(diffText, opts.previewLines);
+            // eslint-disable-next-line no-console
+            console.log("\nPatch preview:");
+            // eslint-disable-next-line no-console
+            console.log(preview);
+        }
         let confirmed = Boolean(opts.yes);
         if (!confirmed) {
             confirmed = await askConfirm("Apply this patch?");

@@ -1,4 +1,5 @@
 ﻿import readline from "node:readline";
+import path from "node:path";
 import { DEFAULT_SYSTEM_PROMPT } from "../prompts/system";
 import type { ChatMessage } from "../types";
 import type { AppConfig } from "../config/schema";
@@ -7,6 +8,7 @@ import { OpenAICompatClient } from "../provider/openaiCompatClient";
 import type { Logger } from "../utils/logger";
 import type { RepoIndex } from "../repo/scan";
 import { buildRepoSummaryContext, buildRepoSearchContext } from "../repo/context";
+import { readFileTruncated } from "../repo/tools";
 
 export interface RepoChatReplOptions {
   config: AppConfig;
@@ -22,6 +24,11 @@ export interface RepoChatReplOptions {
 export async function runRepoChatRepl(opts: RepoChatReplOptions): Promise<void> {
   let currentRouteRef = opts.modelOverride ?? opts.config.Router.default;
   let route = resolveRoute(opts.config, currentRouteRef);
+
+  const MAX_OPEN_FILES = 6;
+  const MAX_OPEN_FILE_BYTES = 12_000;
+  const extraContextBlocks: string[] = [];
+  const openedFiles = new Set<string>();
 
   const summary = await buildRepoSummaryContext({
     cwd: opts.cwd,
@@ -54,6 +61,7 @@ export async function runRepoChatRepl(opts: RepoChatReplOptions): Promise<void> 
       [
         "/model <provider,model>  切换模型",
         "/new                     新会话",
+        "/open <path>             读取文件并追加上下文",
         "/help                    帮助",
         "/exit                    退出"
       ].join("\n")
@@ -89,6 +97,8 @@ export async function runRepoChatRepl(opts: RepoChatReplOptions): Promise<void> 
       }
       if (trimmed === "/new") {
         messages = [{ role: "system", content: systemPrompt }];
+        extraContextBlocks.length = 0;
+        openedFiles.clear();
         // eslint-disable-next-line no-console
         console.log("New repo chat session started.");
         rl.prompt();
@@ -103,6 +113,47 @@ export async function runRepoChatRepl(opts: RepoChatReplOptions): Promise<void> 
         rl.prompt();
         return;
       }
+      if (trimmed.startsWith("/open ")) {
+        const rawPath = trimmed.slice("/open ".length).trim();
+        if (!rawPath) {
+          // eslint-disable-next-line no-console
+          console.log("Usage: /open <path>");
+          rl.prompt();
+          return;
+        }
+
+        const targetPath = path.isAbsolute(rawPath)
+          ? path.relative(opts.cwd, rawPath)
+          : rawPath;
+        const normalized = targetPath.replace(/\\/g, "/");
+        if (normalized.startsWith("..")) {
+          // eslint-disable-next-line no-console
+          console.log("Only files inside the repo are allowed.");
+          rl.prompt();
+          return;
+        }
+        if (openedFiles.has(normalized)) {
+          // eslint-disable-next-line no-console
+          console.log(`Already loaded: ${normalized}`);
+          rl.prompt();
+          return;
+        }
+
+        const file = await readFileTruncated(opts.cwd, normalized, {
+          maxBytes: MAX_OPEN_FILE_BYTES
+        });
+        const title = `## Opened File: ${normalized}${file.truncated ? " (truncated)" : ""}`;
+        const block = [title, "```text", file.content, "```"].join("\n");
+        extraContextBlocks.push(block);
+        openedFiles.add(normalized);
+        if (extraContextBlocks.length > MAX_OPEN_FILES) {
+          extraContextBlocks.shift();
+        }
+        // eslint-disable-next-line no-console
+        console.log(`Loaded: ${normalized}`);
+        rl.prompt();
+        return;
+      }
 
       const searchContext = await buildRepoSearchContext({
         cwd: opts.cwd,
@@ -113,7 +164,13 @@ export async function runRepoChatRepl(opts: RepoChatReplOptions): Promise<void> 
         searchLimit: 60
       });
 
+      const extraContext = extraContextBlocks.length > 0
+        ? ["# Opened Files", ...extraContextBlocks].join("\n\n")
+        : "";
+
       const userContent = [
+        extraContext ? extraContext : "",
+        extraContext ? "" : "",
         searchContext ? searchContext : "",
         searchContext ? "" : "",
         "# Task",
@@ -158,11 +215,15 @@ export async function runRepoChatRepl(opts: RepoChatReplOptions): Promise<void> 
         });
         process.stdout.write("\n");
         messages.push({ role: "assistant", content: acc });
+        // eslint-disable-next-line no-console
+        console.log("Tip: use /open <path> to load file content into context.");
       } else {
         const result = await client.chat(req as any);
         // eslint-disable-next-line no-console
         console.log(result.content);
         messages.push({ role: "assistant", content: result.content });
+        // eslint-disable-next-line no-console
+        console.log("Tip: use /open <path> to load file content into context.");
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
