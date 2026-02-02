@@ -14,6 +14,7 @@ import {
   applyPatchToRepo
 } from "../repo/patch";
 import type { ChatMessage } from "../types";
+import { runRepoChatRepl } from "../tui/repoChatRepl";
 
 function askConfirm(question: string): Promise<boolean> {
   const rl = readline.createInterface({
@@ -64,6 +65,31 @@ export function registerRepoCommand(program: Command): void {
     logger.info(`indexed files: ${index.files.length}`);
     // eslint-disable-next-line no-console
     console.log(`Scanned ${index.files.length} files.`);
+  });
+
+  addGlobalOptions(
+    repo
+      .command("chat")
+      .description("Interactive repo chat (with repo context)")
+      .option("--model <provider,model>", "Override default provider,model")
+      .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
+      .option("--no-stream", "Disable streaming responses")
+  ).action(async (opts) => {
+    const { loaded, logger } = await loadConfigAndLogger(opts);
+    const index = await loadRepoIndex(process.cwd());
+    if (!index) {
+      throw new Error("Repo index not found. Run: hc repo scan");
+    }
+
+    await runRepoChatRepl({
+      config: loaded.config,
+      index,
+      logger,
+      maxTokensOverride: opts.maxTokens,
+      stream: Boolean(opts.stream),
+      modelOverride: opts.model,
+      cwd: process.cwd()
+    });
   });
 
   addGlobalOptions(

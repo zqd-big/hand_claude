@@ -14,6 +14,7 @@ const router_1 = require("../router/router");
 const openaiCompatClient_1 = require("../provider/openaiCompatClient");
 const system_1 = require("../prompts/system");
 const patch_1 = require("../repo/patch");
+const repoChatRepl_1 = require("../tui/repoChatRepl");
 function askConfirm(question) {
     const rl = node_readline_1.default.createInterface({
         input: process.stdin,
@@ -56,6 +57,27 @@ function registerRepoCommand(program) {
         logger.info(`indexed files: ${index.files.length}`);
         // eslint-disable-next-line no-console
         console.log(`Scanned ${index.files.length} files.`);
+    });
+    (0, common_1.addGlobalOptions)(repo
+        .command("chat")
+        .description("Interactive repo chat (with repo context)")
+        .option("--model <provider,model>", "Override default provider,model")
+        .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
+        .option("--no-stream", "Disable streaming responses")).action(async (opts) => {
+        const { loaded, logger } = await (0, common_1.loadConfigAndLogger)(opts);
+        const index = await (0, repo_1.loadRepoIndex)(process.cwd());
+        if (!index) {
+            throw new Error("Repo index not found. Run: hc repo scan");
+        }
+        await (0, repoChatRepl_1.runRepoChatRepl)({
+            config: loaded.config,
+            index,
+            logger,
+            maxTokensOverride: opts.maxTokens,
+            stream: Boolean(opts.stream),
+            modelOverride: opts.model,
+            cwd: process.cwd()
+        });
     });
     (0, common_1.addGlobalOptions)(repo
         .command("ask")
