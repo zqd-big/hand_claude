@@ -56,7 +56,7 @@ C:\Users\ZQD\Desktop\手搓claude
 C:\Users\ZQD\.gemini\antigravity\scratch\study\
 ```
 
-### 4) 使用（CMD 或 PowerShell）
+### 4) 使用（Windows / Linux / macOS）
 
 #### CMD（命令提示符）
 ```cmd
@@ -73,6 +73,23 @@ cd C:\Users\ZQD\.gemini\antigravity\scratch\study\
 
 C:\Users\ZQD\Desktop\手搓claude\hc.ps1 repo scan
 C:\Users\ZQD\Desktop\手搓claude\hc.ps1 repo ask "解读这个项目"
+```
+
+#### Linux / macOS（需要系统已安装 Node 20+）
+```bash
+cd /path/to/your/project
+
+export HCAI_HUAWEI_API_KEY="你的key"
+
+node /path/to/hand_claude/dist/index.js repo scan --config /path/to/hand_claude/hcai.dashscope.config.json
+node /path/to/hand_claude/dist/index.js repo ask "解读这个项目" --config /path/to/hand_claude/hcai.dashscope.config.json
+```
+
+也可以使用脚本入口（首次需执行一次 chmod）：
+```bash
+chmod +x /path/to/hand_claude/hc.sh
+/path/to/hand_claude/hc.sh repo scan
+/path/to/hand_claude/hc.sh repo ask "解读这个项目"
 ```
 
 ## 常用命令
@@ -93,12 +110,41 @@ C:\Users\ZQD\Desktop\手搓claude\hc.ps1 repo ask "解读这个项目"
   hc repo ask "这个项目如何启动"
   hc repo edit "给 README 增加快速开始"
   ```
+  `repo edit` 会展示改动摘要与 patch 预览，确认后才落盘。
+
+- 仓库交互式对话（带上下文）：
+  ```
+  hc repo chat
+  ```
+  在对话中可用：
+  ```
+  /open <path>
+  ```
+  把文件内容追加到上下文。
+
+## repo ask 记忆说明
+
+`repo ask` 默认会保存简要问答历史到目标项目的：
+```
+.hcai/repo-ask-memory.json
+```
+
+当历史过长时，会自动压缩为摘要，避免上下文爆炸。
+
+你可以这样控制：
+```
+hc repo ask "问题" --reset-memory   # 清空历史后再问
+hc repo ask "问题" --no-memory      # 本次不使用历史
+hc repo ask "问题" --history 3      # 仅带入最近 3 轮 Q/A
+hc repo ask "问题" --no-model-summary  # 关闭模型摘要
+```
 
 ## 关于 hc.cmd / hc.ps1
 
 项目根目录已提供：
 - `hc.cmd`（CMD 用）
 - `hc.ps1`（PowerShell 用）
+- `hc.sh`（Linux/macOS 用）
 
 它们会自动：
 - 使用 `dist/index.js`
@@ -106,6 +152,9 @@ C:\Users\ZQD\Desktop\手搓claude\hc.ps1 repo ask "解读这个项目"
 - 自动使用内置便携 Node（`node-v20.11.1-win-x64`）
 
 你无需再手动输入 `node dist/index.js ...`。
+
+> 说明：内置便携 Node 仅提供 Windows 版本。  
+> Linux/macOS 需要自行安装 Node 20+ 后，使用 `node dist/index.js` 运行。
 
 
 ## 常见问题
