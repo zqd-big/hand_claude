@@ -12,3 +12,10 @@ Thumbs.db
 # Offline packaging
 .package/
 dist-packages/
+
+# Archive files
+*.zip
+*.tar.gz
+*.tgz
+*.7z
+*.rar
