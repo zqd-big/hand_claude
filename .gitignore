@@ -10,6 +10,5 @@ Thumbs.db
 .env.local
 
 # Offline packaging
-.runtime/
 .package/
 dist-packages/
