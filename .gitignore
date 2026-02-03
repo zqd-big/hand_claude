@@ -8,3 +8,8 @@ Thumbs.db
 # Environment files (contains secrets)
 .env
 .env.local
+
+# Offline packaging
+.runtime/
+.package/
+dist-packages/

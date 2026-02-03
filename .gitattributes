@@ -1,0 +1,9 @@
+﻿# Normalize text files, then enforce platform-friendly line endings.
+* text=auto
+
+# Shell scripts must be LF (avoid /usr/bin/env: 'bash\r' errors)
+*.sh text eol=lf
+
+# Windows scripts should keep CRLF
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

@@ -75,7 +75,7 @@ C:\Users\ZQD\Desktop\手搓claude\hc.ps1 repo scan
 C:\Users\ZQD\Desktop\手搓claude\hc.ps1 repo ask "解读这个项目"
 ```
 
-#### Linux / macOS（需要系统已安装 Node 20+）
+#### Linux / macOS（离线推荐：hc.sh + .runtime；也可用系统 Node 20+）
 ```bash
 cd /path/to/your/project
 
@@ -85,11 +85,16 @@ node /path/to/hand_claude/dist/index.js repo scan --config /path/to/hand_claude/
 node /path/to/hand_claude/dist/index.js repo ask "解读这个项目" --config /path/to/hand_claude/hcai.dashscope.config.json
 ```
 
-也可以使用脚本入口（首次需执行一次 chmod）：
+也可以使用脚本入口（首次可能需要 chmod；默认不自动下载，离线优先；如需在线下载需显式开启）：
 ```bash
 chmod +x /path/to/hand_claude/hc.sh
 /path/to/hand_claude/hc.sh repo scan
 /path/to/hand_claude/hc.sh repo ask "解读这个项目"
+```
+
+如需在线自动下载 Node（不推荐在离线环境使用）：
+```bash
+HCAI_ALLOW_NODE_DOWNLOAD=1 /path/to/hand_claude/hc.sh repo scan
 ```
 
 ## 常用命令
@@ -153,8 +158,81 @@ hc repo ask "问题" --no-model-summary  # 关闭模型摘要
 
 你无需再手动输入 `node dist/index.js ...`。
 
-> 说明：内置便携 Node 仅提供 Windows 版本。  
-> Linux/macOS 需要自行安装 Node 20+ 后，使用 `node dist/index.js` 运行。
+> 说明：Windows 内置便携 Node。  
+> Linux/macOS 默认离线优先：优先使用 `.runtime/` 中的 Node 运行时；若不存在则尝试使用系统 `node`（需 >=20）。  
+> 如需在线自动下载 Node，设置 `HCAI_ALLOW_NODE_DOWNLOAD=1`（默认关闭）。
+
+## Linux/macOS 彻底离线（拷贝目录即可用）
+
+如果你希望 **直接拷贝整个项目目录到离线 Linux/macOS 机器就能用**，请在有网机器先准备好依赖与构建产物（确保存在 `dist/` 与 `node_modules/`）：
+
+```bash
+npm ci
+npm run build
+```
+
+然后再把运行时下载到 `.runtime/`：
+
+### Windows 上准备运行时（推荐）
+```powershell
+.\scripts\prepare-offline-runtime.ps1 -TargetOS linux -TargetArch x64
+.\scripts\prepare-offline-runtime.ps1 -TargetOS darwin -TargetArch arm64
+```
+
+### Linux/macOS 上准备运行时
+```bash
+TARGET_OS=linux TARGET_ARCH=x64 ./scripts/prepare-offline-runtime.sh
+TARGET_OS=darwin TARGET_ARCH=arm64 ./scripts/prepare-offline-runtime.sh
+```
+
+完成后，直接**复制整个项目目录**到离线机器即可：
+```bash
+./hc.sh repo scan
+```
+
+离线常见问题：
+- Permission denied：先执行 `chmod +x hc.sh`，或用 `bash hc.sh repo scan`。
+- /usr/bin/env: 'bash\\r'：说明脚本是 CRLF 行尾；请用 git clone（有 .gitattributes 自动转 LF）或使用 `dos2unix hc.sh` 转换。
+- 架构不匹配：`uname -m` 若是 `aarch64/arm64`，需要准备 `linux-arm64` 运行时而不是 `linux-x64`。
+
+## Linux/macOS 离线包（内含 Node）
+
+在 Linux/macOS 上执行下面脚本，会生成离线 tar 包（内含 Node 20+，并包含 `dist/` + `node_modules/`，解压即可用）：
+
+> 打包前请确保已执行过：`npm ci && npm run build`。
+
+```bash
+chmod +x scripts/package-offline.sh
+./scripts/package-offline.sh
+```
+
+输出目录：
+```
+dist-packages/hc-code-<os>-<arch>.tar.gz
+```
+
+使用方式（解压后）：
+```bash
+tar -xzf hc-code-<os>-<arch>.tar.gz
+cd hc-code-<os>-<arch>
+./hc.sh repo scan
+./hc.sh repo ask "解读这个项目"
+```
+
+> 说明：该脚本会下载 Node 官方发行版，请在联网环境执行一次打包，再拷贝到离线环境使用。
+
+### Windows 上打 Linux/macOS 离线包
+
+如果你只有 Windows 机器，也可以直接打包 Linux/macOS 离线包：
+```powershell
+.\scripts\package-offline.ps1 -TargetOS linux -TargetArch x64
+.\scripts\package-offline.ps1 -TargetOS darwin -TargetArch arm64
+```
+
+输出文件同样在：
+```
+dist-packages/hc-code-<os>-<arch>.tar.gz
+```
 
 
 ## 常见问题
