@@ -7,10 +7,12 @@ exports.runRepoChatRepl = runRepoChatRepl;
 const node_readline_1 = __importDefault(require("node:readline"));
 const node_path_1 = __importDefault(require("node:path"));
 const system_1 = require("../prompts/system");
+const platformHint_1 = require("../prompts/platformHint");
 const router_1 = require("../router/router");
 const openaiCompatClient_1 = require("../provider/openaiCompatClient");
 const context_1 = require("../repo/context");
 const tools_1 = require("../repo/tools");
+const agentLoop_1 = require("../agent/agentLoop");
 async function runRepoChatRepl(opts) {
     let currentRouteRef = opts.modelOverride ?? opts.config.Router.default;
     let route = (0, router_1.resolveRoute)(opts.config, currentRouteRef);
@@ -29,6 +31,8 @@ async function runRepoChatRepl(opts) {
     const systemPrompt = [
         system_1.DEFAULT_SYSTEM_PROMPT,
         "",
+        (0, platformHint_1.getPlatformHint)(),
+        "",
         "你正在一个代码仓库中工作，请结合仓库上下文回答问题。",
         "",
         summary
@@ -39,6 +43,13 @@ async function runRepoChatRepl(opts) {
         output: process.stdout,
         prompt: "hc(repo)> "
     });
+    const askConfirm = (question) => {
+        return new Promise((resolve) => {
+            rl.question(`${question} (y/N): `, (answer) => {
+                resolve(["y", "yes"].includes(answer.trim().toLowerCase()));
+            });
+        });
+    };
     const printHelp = () => {
         // eslint-disable-next-line no-console
         console.log([
@@ -166,7 +177,30 @@ async function runRepoChatRepl(opts) {
                 timeoutMs: 90_000,
                 logger: opts.logger
             });
-            if (opts.stream) {
+            if (opts.agentEnabled) {
+                await (0, agentLoop_1.runAgentLoop)({
+                    client,
+                    messages,
+                    makeRequest: (msgs) => (0, router_1.applyProviderTransformers)(route.provider, {
+                        model: route.modelName,
+                        messages: msgs,
+                        stream: opts.stream,
+                        max_tokens: effectiveMaxTokens(undefined)
+                    }),
+                    cwd: opts.cwd,
+                    logger: opts.logger,
+                    io: {
+                        stdout: (s) => process.stdout.write(s),
+                        stderr: (s) => process.stderr.write(s),
+                        info: (line) => console.log(line)
+                    },
+                    maxSteps: opts.agentSteps,
+                    tailLines: opts.tailLines,
+                    yes: opts.yes,
+                    confirm: (q) => (opts.yes ? Promise.resolve(true) : askConfirm(q))
+                });
+            }
+            else if (opts.stream) {
                 let acc = "";
                 await client.chatStream(req, {
                     onToken: (token) => {
@@ -184,17 +218,15 @@ async function runRepoChatRepl(opts) {
                 });
                 process.stdout.write("\n");
                 messages.push({ role: "assistant", content: acc });
-                // eslint-disable-next-line no-console
-                console.log("Tip: use /open <path> to load file content into context.");
             }
             else {
                 const result = await client.chat(req);
                 // eslint-disable-next-line no-console
                 console.log(result.content);
                 messages.push({ role: "assistant", content: result.content });
-                // eslint-disable-next-line no-console
-                console.log("Tip: use /open <path> to load file content into context.");
             }
+            // eslint-disable-next-line no-console
+            console.log("Tip: use /open <path> to load file content into context.");
         }
         catch (err) {
             const message = err instanceof Error ? err.message : String(err);

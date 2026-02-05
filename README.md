@@ -144,6 +144,24 @@ hc repo ask "问题" --history 3      # 仅带入最近 3 轮 Q/A
 hc repo ask "问题" --no-model-summary  # 关闭模型摘要
 ```
 
+## Repo Agent（命令块自动执行）
+
+你今天遇到的“模型给了 ```bash``` 命令，但在 Windows 里跑不了”的问题，本质是**命令不匹配当前平台**，并且 hc 之前只会“打印命令”不会“执行命令”。
+
+现在 `hc repo ask` / `hc repo chat` 默认开启一个轻量 Agent：
+- 当模型输出 ```powershell``` / ```cmd``` / ```bash``` 命令块时，hc 会检测到并提示你确认是否执行
+- 执行后会把输出（仅 tail N 行）回填给模型，让模型基于真实结果继续回答
+
+Windows 规则：
+- 只执行 `powershell` / `cmd` 命令块
+- 遇到 `bash` 命令块会提示模型改写成 PowerShell/CMD（避免依赖 Git Bash / WSL）
+
+常用参数：
+- `--no-agent`：关闭自动执行
+- `--yes`：跳过确认直接执行（有风险）
+- `--agent-steps N`：最多执行/回填 N 轮（默认 3）
+- `--tail N`：回填给模型的输出行数（默认 2000）
+
 ## 关于 hc.cmd / hc.ps1
 
 项目根目录已提供：

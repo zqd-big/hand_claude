@@ -13,8 +13,10 @@ const memory_1 = require("../repo/memory");
 const router_1 = require("../router/router");
 const openaiCompatClient_1 = require("../provider/openaiCompatClient");
 const system_1 = require("../prompts/system");
+const platformHint_1 = require("../prompts/platformHint");
 const patch_1 = require("../repo/patch");
 const repoChatRepl_1 = require("../tui/repoChatRepl");
+const agentLoop_1 = require("../agent/agentLoop");
 function askConfirm(question) {
     const rl = node_readline_1.default.createInterface({
         input: process.stdin,
@@ -128,7 +130,11 @@ function registerRepoCommand(program) {
         .description("Interactive repo chat (with repo context)")
         .option("--model <provider,model>", "Override default provider,model")
         .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
-        .option("--no-stream", "Disable streaming responses")).action(async (opts) => {
+        .option("--no-stream", "Disable streaming responses")
+        .option("--no-agent", "Disable command block auto execution")
+        .option("--yes", "Skip confirmation for executing command blocks")
+        .option("--agent-steps <n>", "Max agent steps (default 3)", (v) => Number(v), 3)
+        .option("--tail <n>", "Tail lines captured for model context (default 2000)", (v) => Number(v), 2000)).action(async (opts) => {
         const { loaded, logger } = await (0, common_1.loadConfigAndLogger)(opts);
         const index = await (0, repo_1.loadRepoIndex)(process.cwd());
         if (!index) {
@@ -141,7 +147,11 @@ function registerRepoCommand(program) {
             maxTokensOverride: opts.maxTokens,
             stream: Boolean(opts.stream),
             modelOverride: opts.model,
-            cwd: process.cwd()
+            cwd: process.cwd(),
+            agentEnabled: Boolean(opts.agent),
+            yes: Boolean(opts.yes),
+            agentSteps: Number(opts.agentSteps ?? 3),
+            tailLines: Number(opts.tail ?? 2000)
         });
     });
     (0, common_1.addGlobalOptions)(repo
@@ -155,6 +165,10 @@ function registerRepoCommand(program) {
         .option("--reset-memory", "Clear saved repo ask memory before asking")
         .option("--no-model-summary", "Disable model-based memory summary")
         .option("--no-hint", "Disable hint after answer")
+        .option("--no-agent", "Disable command block auto execution")
+        .option("--yes", "Skip confirmation for executing command blocks")
+        .option("--agent-steps <n>", "Max agent steps (default 3)", (v) => Number(v), 3)
+        .option("--tail <n>", "Tail lines captured for model context (default 2000)", (v) => Number(v), 2000)
         .option("--history <n>", "Number of Q/A pairs to include (default 5)", (v) => Number(v), 5)).action(async (task, opts) => {
         const { loaded, logger } = await (0, common_1.loadConfigAndLogger)(opts);
         const index = await (0, repo_1.loadRepoIndex)(process.cwd());
@@ -178,8 +192,9 @@ function registerRepoCommand(program) {
             await (0, memory_1.saveRepoAskMemory)(process.cwd(), memory);
         }
         const historyText = buildHistoryText(memory, opts.history);
+        const systemPrompt = [system_1.DEFAULT_SYSTEM_PROMPT, "", (0, platformHint_1.getPlatformHint)()].join("\n");
         const messages = [
-            { role: "system", content: system_1.DEFAULT_SYSTEM_PROMPT },
+            { role: "system", content: systemPrompt },
             {
                 role: "user",
                 content: [
@@ -210,7 +225,35 @@ function registerRepoCommand(program) {
             logger
         });
         let output = "";
-        if (opts.stream) {
+        const agentEnabled = Boolean(opts.agent);
+        if (agentEnabled) {
+            const yes = Boolean(opts.yes);
+            const tailN = Number(opts.tail ?? 2000);
+            const maxSteps = Number(opts.agentSteps ?? 3);
+            const { finalContent } = await (0, agentLoop_1.runAgentLoop)({
+                client,
+                messages,
+                makeRequest: (msgs) => (0, router_1.applyProviderTransformers)(route.provider, {
+                    model: route.modelName,
+                    messages: msgs,
+                    stream: Boolean(opts.stream),
+                    max_tokens: opts.maxTokens
+                }),
+                cwd: process.cwd(),
+                logger,
+                io: {
+                    stdout: (s) => process.stdout.write(s),
+                    stderr: (s) => process.stderr.write(s),
+                    info: (line) => console.log(line)
+                },
+                maxSteps,
+                tailLines: tailN,
+                yes,
+                confirm: (q) => (yes ? Promise.resolve(true) : askConfirm(q))
+            });
+            output = finalContent;
+        }
+        else if (opts.stream) {
             await client.chatStream(req, {
                 onToken: (token) => {
                     output += token;

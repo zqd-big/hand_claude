@@ -18,6 +18,7 @@ import {
 } from "../router/router";
 import { OpenAICompatClient } from "../provider/openaiCompatClient";
 import { DEFAULT_SYSTEM_PROMPT } from "../prompts/system";
+import { getPlatformHint } from "../prompts/platformHint";
 import {
   extractDiffBlock,
   validatePatchAgainstRepo,
@@ -26,6 +27,7 @@ import {
 } from "../repo/patch";
 import type { ChatMessage } from "../types";
 import { runRepoChatRepl } from "../tui/repoChatRepl";
+import { runAgentLoop } from "../agent/agentLoop";
 
 function askConfirm(question: string): Promise<boolean> {
   const rl = readline.createInterface({
@@ -168,6 +170,20 @@ export function registerRepoCommand(program: Command): void {
       .option("--model <provider,model>", "Override default provider,model")
       .option("--max-tokens <n>", "Override max_tokens", (v) => Number(v))
       .option("--no-stream", "Disable streaming responses")
+      .option("--no-agent", "Disable command block auto execution")
+      .option("--yes", "Skip confirmation for executing command blocks")
+      .option(
+        "--agent-steps <n>",
+        "Max agent steps (default 3)",
+        (v) => Number(v),
+        3
+      )
+      .option(
+        "--tail <n>",
+        "Tail lines captured for model context (default 2000)",
+        (v) => Number(v),
+        2000
+      )
   ).action(async (opts) => {
     const { loaded, logger } = await loadConfigAndLogger(opts);
     const index = await loadRepoIndex(process.cwd());
@@ -182,7 +198,11 @@ export function registerRepoCommand(program: Command): void {
       maxTokensOverride: opts.maxTokens,
       stream: Boolean(opts.stream),
       modelOverride: opts.model,
-      cwd: process.cwd()
+      cwd: process.cwd(),
+      agentEnabled: Boolean(opts.agent),
+      yes: Boolean(opts.yes),
+      agentSteps: Number(opts.agentSteps ?? 3),
+      tailLines: Number(opts.tail ?? 2000)
     });
   });
 
@@ -198,6 +218,20 @@ export function registerRepoCommand(program: Command): void {
       .option("--reset-memory", "Clear saved repo ask memory before asking")
       .option("--no-model-summary", "Disable model-based memory summary")
       .option("--no-hint", "Disable hint after answer")
+      .option("--no-agent", "Disable command block auto execution")
+      .option("--yes", "Skip confirmation for executing command blocks")
+      .option(
+        "--agent-steps <n>",
+        "Max agent steps (default 3)",
+        (v) => Number(v),
+        3
+      )
+      .option(
+        "--tail <n>",
+        "Tail lines captured for model context (default 2000)",
+        (v) => Number(v),
+        2000
+      )
       .option(
         "--history <n>",
         "Number of Q/A pairs to include (default 5)",
@@ -232,8 +266,12 @@ export function registerRepoCommand(program: Command): void {
 
     const historyText = buildHistoryText(memory, opts.history);
 
+    const systemPrompt = [DEFAULT_SYSTEM_PROMPT, "", getPlatformHint()].join(
+      "\n"
+    );
+
     const messages: ChatMessage[] = [
-      { role: "system", content: DEFAULT_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
         content: [
@@ -268,7 +306,37 @@ export function registerRepoCommand(program: Command): void {
     });
 
     let output = "";
-    if (opts.stream) {
+
+    const agentEnabled = Boolean(opts.agent);
+    if (agentEnabled) {
+      const yes = Boolean(opts.yes);
+      const tailN = Number(opts.tail ?? 2000);
+      const maxSteps = Number(opts.agentSteps ?? 3);
+
+      const { finalContent } = await runAgentLoop({
+        client,
+        messages,
+        makeRequest: (msgs) =>
+          applyProviderTransformers(route.provider, {
+            model: route.modelName,
+            messages: msgs,
+            stream: Boolean(opts.stream),
+            max_tokens: opts.maxTokens
+          }) as any,
+        cwd: process.cwd(),
+        logger,
+        io: {
+          stdout: (s) => process.stdout.write(s),
+          stderr: (s) => process.stderr.write(s),
+          info: (line) => console.log(line)
+        },
+        maxSteps,
+        tailLines: tailN,
+        yes,
+        confirm: (q) => (yes ? Promise.resolve(true) : askConfirm(q))
+      });
+      output = finalContent;
+    } else if (opts.stream) {
       await client.chatStream(req as any, {
         onToken: (token) => {
           output += token;
