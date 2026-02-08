@@ -25,6 +25,7 @@ import {
   applyPatchToRepo,
   formatPatchPreview
 } from "../repo/patch";
+import { readFileTruncated } from "../repo/tools";
 import type { ChatMessage } from "../types";
 import { runRepoChatRepl } from "../tui/repoChatRepl";
 import { runAgentLoop } from "../agent/agentLoop";
@@ -412,6 +413,12 @@ export function registerRepoCommand(program: Command): void {
       .option("--no-stream", "Disable streaming responses")
       .option("--no-preview", "Disable patch preview")
       .option(
+        "--patch-retries <n>",
+        "Retry to regenerate patch if validation fails (default 2)",
+        (v) => Number(v),
+        2
+      )
+      .option(
         "--preview-lines <n>",
         "Max preview lines (default 120)",
         (v) => Number(v),
@@ -442,19 +449,14 @@ export function registerRepoCommand(program: Command): void {
       task
     ].join("\n");
 
+    const systemPrompt = [DEFAULT_SYSTEM_PROMPT, "", getPlatformHint()].join(
+      "\n"
+    );
+
     const messages: ChatMessage[] = [
-      { role: "system", content: DEFAULT_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
     ];
-
-    const baseReq = {
-      model: route.modelName,
-      messages,
-      stream: Boolean(opts.stream),
-      max_tokens: opts.maxTokens
-    };
-
-    const req = applyProviderTransformers(route.provider, baseReq);
 
     const client = new OpenAICompatClient({
       apiBaseUrl: route.provider.api_base_url,
@@ -463,44 +465,147 @@ export function registerRepoCommand(program: Command): void {
       logger
     });
 
-    let output = "";
+    const maxRetries = Math.max(0, Number(opts.patchRetries ?? 2));
+    const maxAttempts = maxRetries + 1;
 
-    if (opts.stream) {
-      await client.chatStream(req as any, {
-        onToken: (token) => {
-          output += token;
-          process.stdout.write(token);
-        },
-        onDone: () => {},
-        onError: (err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          // eslint-disable-next-line no-console
-          console.error(`\n[stream error] ${message}`);
+    const buildPatchRepairContext = async (
+      cwd: string,
+      errors: string[],
+      patchText: string
+    ): Promise<string> => {
+      const files = new Set<string>();
+      for (const e of errors) {
+        const m = e.match(/file:\s*(.+)\s*$/i);
+        if (m?.[1]) files.add(m[1].trim());
+      }
+
+      const parts: string[] = [];
+      if (files.size > 0) {
+        parts.push("# Current File Content (for patch regeneration)");
+        for (const rel of Array.from(files)) {
+          try {
+            const file = await readFileTruncated(cwd, rel, { maxBytes: 12_000 });
+            parts.push(`## ${rel}${file.truncated ? " (truncated)" : ""}`);
+            parts.push("```text");
+            parts.push(file.content);
+            parts.push("```");
+            parts.push("");
+          } catch {
+            parts.push(`## ${rel}`);
+            parts.push("(failed to read file)");
+            parts.push("");
+          }
         }
-      });
-      process.stdout.write("\n");
-    } else {
-      const result = await client.chat(req as any);
-      output = result.content;
-      // eslint-disable-next-line no-console
-      console.log(output);
-    }
+      }
 
-    const diffText = extractDiffBlock(output);
-    if (!diffText) {
-      throw new Error(
-        "Model output does not contain a ```diff``` patch block."
+      parts.push("# Previous Patch Preview (may not apply)");
+      parts.push("```diff");
+      parts.push(formatPatchPreview(patchText, 200));
+      parts.push("```");
+
+      return parts.join("\n").trim();
+    };
+
+    let attempt = 0;
+    let output = "";
+    let diffText: string | null = null;
+    let validation: Awaited<ReturnType<typeof validatePatchAgainstRepo>> | null =
+      null;
+
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      output = "";
+
+      const req = applyProviderTransformers(route.provider, {
+        model: route.modelName,
+        messages,
+        stream: Boolean(opts.stream),
+        max_tokens: opts.maxTokens
+      });
+
+      if (opts.stream) {
+        await client.chatStream(req as any, {
+          onToken: (token) => {
+            output += token;
+            process.stdout.write(token);
+          },
+          onDone: () => {},
+          onError: (err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            // eslint-disable-next-line no-console
+            console.error(`\n[stream error] ${message}`);
+          }
+        });
+        process.stdout.write("\n");
+      } else {
+        const result = await client.chat(req as any);
+        output = result.content;
+        // eslint-disable-next-line no-console
+        console.log(output);
+      }
+
+      diffText = extractDiffBlock(output);
+      if (!diffText) {
+        if (attempt >= maxAttempts) {
+          throw new Error(
+            "Model output does not contain a ```diff``` patch block."
+          );
+        }
+
+        messages.push({ role: "assistant", content: output });
+        messages.push({
+          role: "user",
+          content: [
+            "你的输出里没有包含可应用的 ```diff``` patch。",
+            "请只输出一个 unified diff patch，并放在 ```diff 代码块中。",
+            "不要输出其它解释文本。"
+          ].join("\n")
+        });
+        // eslint-disable-next-line no-console
+        console.error(
+          `[hc] missing diff block. Retrying patch generation (${attempt}/${maxAttempts})...`
+        );
+        continue;
+      }
+
+      validation = await validatePatchAgainstRepo(process.cwd(), diffText, index);
+      if (validation.ok) break;
+
+      if (attempt >= maxAttempts) {
+        const details = validation.errors.join("\n");
+        throw new Error(`Patch validation failed:\n${details}`);
+      }
+
+      const details = validation.errors.join("\n");
+      const repairContext = await buildPatchRepairContext(
+        process.cwd(),
+        validation.errors,
+        diffText
+      );
+
+      messages.push({ role: "assistant", content: output });
+      messages.push({
+        role: "user",
+        content: [
+          "你的 patch 无法应用到当前仓库，请修复后重新输出可应用的 unified diff patch。",
+          "",
+          "Validation Errors:",
+          details,
+          "",
+          repairContext,
+          "",
+          "请重新输出：只输出一个 ```diff``` 代码块，确保能应用到当前文件内容。"
+        ].join("\n")
+      });
+
+      // eslint-disable-next-line no-console
+      console.error(
+        `[hc] patch validation failed. Retrying patch generation (${attempt}/${maxAttempts})...`
       );
     }
 
-    const validation = await validatePatchAgainstRepo(
-      process.cwd(),
-      diffText,
-      index
-    );
-    if (!validation.ok) {
-      const details = validation.errors.join("\n");
-      throw new Error(`Patch validation failed:\n${details}`);
+    if (!diffText || !validation || !validation.ok) {
+      throw new Error("Failed to obtain a valid patch after retries.");
     }
 
     // eslint-disable-next-line no-console

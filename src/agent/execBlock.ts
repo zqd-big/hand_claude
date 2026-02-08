@@ -52,7 +52,19 @@ function buildRunner(shell: CommandShell): {
       ext: "ps1",
       normalizeContent: (script) => {
         // Windows PowerShell 5.1 reads UTF-8 reliably when BOM is present.
-        const body = script.replace(/\r?\n/g, "\r\n");
+        const prelude = [
+          "$ErrorActionPreference = 'Stop'",
+          "$ProgressPreference = 'SilentlyContinue'",
+          ""
+        ].join("\r\n");
+
+        const suffix = [
+          "",
+          // Ensure external command failures propagate to the process exit code.
+          "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+        ].join("\r\n");
+
+        const body = (prelude + script + suffix).replace(/\r?\n/g, "\r\n");
         return `\ufeff${body}`;
       }
     };
